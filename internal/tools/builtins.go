@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -202,7 +203,24 @@ func (t writeFileTool) Schema() ParamSchema {
 }
 func (t writeFileTool) Invoke(ctx context.Context, c Call) (Result, error) {
 	path, _ := argString(c.Args, "path")
-	content, _ := argString(c.Args, "content")
+	content, ok := argString(c.Args, "content")
+	if !ok {
+		// tiller-lab fix: models often send a JSON file's content as a JSON OBJECT, not a string. argString then
+		// returned "" and the tool silently wrote a 0-byte file (r2: package.json/tsconfig.json/wrangler.jsonc
+		// empty across 9 attempts on two models). Write objects/arrays as formatted JSON; reject anything else.
+		switch v := c.Args["content"].(type) {
+		case map[string]any, []any:
+			b, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				return Result{}, fmt.Errorf("write_file: content is not a string and could not be encoded as JSON: %v", err)
+			}
+			content = string(b) + "\n"
+		case nil:
+			return Result{}, fmt.Errorf("write_file: missing content (pass the full file text as a string)")
+		default:
+			return Result{}, fmt.Errorf("write_file: content must be a string (got %T)", v)
+		}
+	}
 	if err := WriteFile(t.ws, path, content); err != nil {
 		return Result{}, err
 	}
