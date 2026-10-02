@@ -118,6 +118,8 @@ const (
 	// disabled; unset or anything else ⇒ enabled. The --no-mcp flag (Phase 03)
 	// overrides this; per-server "disabled" is the profile-level switch.
 	EnvMCP = "KLOO_MCP"
+	// EnvViewImage ("1"/"true") offers the view_image tool, like --view-image.
+	EnvViewImage = "KLOO_VIEW_IMAGE"
 	// EnvLint overrides the auto-detected fast advisory lint command (mirrors the
 	// --lint flag). A value of "0"/"false" (case-insensitive) instead disables lint
 	// — mirroring the EnvMCP truthiness convention — and is NOT treated as a command.
@@ -290,6 +292,16 @@ type Config struct {
 	// NoThinkExplicit is true when --no-think was explicitly provided. TUI runtime
 	// alias switches use this to preserve CLI flag precedence over profile aliases.
 	NoThinkExplicit bool
+	// Images are the --image paths attached to the task message (vision input).
+	// CLI-only: an image belongs to one task, never to a profile.
+	Images []string
+	// ViewImage offers the opt-in view_image tool (--view-image, KLOO_VIEW_IMAGE,
+	// profile "viewImage").
+	ViewImage bool
+	// TextOnly marks the model as unable to take image input (profile "textOnly",
+	// --text-only). Resolve refuses images for such a model up front, so the
+	// mistake costs a config error instead of a model call.
+	TextOnly bool
 	// ScopeAllow/ScopeDeny/ScopeReadOnly are the raw CLI scope-glob overrides
 	// (--allow/--deny/--read-only). nil ⇒ the flag was not set (the .kloo/scope.yaml
 	// value for that key stands); a non-nil slice REPLACES the manifest list for that
@@ -410,6 +422,12 @@ type Flags struct {
 	StatusFile *string
 	// NoThink (--no-think) asks compatible backends to disable reasoning. nil ⇒ unset.
 	NoThink *bool
+	// Images (--image, repeatable) are attached to the task message. nil ⇒ none.
+	Images []string
+	// ViewImage (--view-image) offers the view_image tool. nil ⇒ unset.
+	ViewImage *bool
+	// TextOnly (--text-only) marks the model text-only for this run. nil ⇒ unset.
+	TextOnly *bool
 	// ScopeAllow/ScopeDeny/ScopeReadOnly (--allow/--deny/--read-only) are the raw
 	// scope-glob overrides. nil ⇒ flag not set (leaves the manifest key untouched).
 	ScopeAllow    []string
@@ -458,6 +476,8 @@ type profileEntry struct {
 	UsableWindowFrac        *float64 `json:"usableWindowFrac,omitempty"`
 	CompactTriggerFrac      *float64 `json:"compactTriggerFrac,omitempty"`
 	NoThink                 *bool    `json:"noThink,omitempty"`
+	TextOnly                *bool    `json:"textOnly,omitempty"`
+	ViewImage               *bool    `json:"viewImage,omitempty"`
 	LLMMaxRetries           *int     `json:"llmMaxRetries,omitempty"`
 	LLMRetryCodes           []int    `json:"llmRetryCodes,omitempty"`
 	LLMRetryBaseDelay       *string  `json:"llmRetryBaseDelay,omitempty"`
@@ -653,6 +673,12 @@ func applyModelTuning(cfg *Config, e profileEntry) {
 	}
 	if e.NoThink != nil {
 		cfg.NoThink = *e.NoThink
+	}
+	if e.TextOnly != nil {
+		cfg.TextOnly = *e.TextOnly
+	}
+	if e.ViewImage != nil {
+		cfg.ViewImage = *e.ViewImage
 	}
 	if e.LLMMaxRetries != nil {
 		cfg.LLMMaxRetries = *e.LLMMaxRetries
@@ -899,6 +925,9 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 	if v := getenv(EnvMCP); v == "0" || strings.EqualFold(v, "false") {
 		cfg.MCPDisabled = true
 	}
+	if v := getenv(EnvViewImage); v != "" {
+		cfg.ViewImage = v == "1" || strings.EqualFold(v, "true")
+	}
 	if v := getenv(EnvCuratorBudget); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CuratorBudgetTokens = n
@@ -1097,6 +1126,15 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		cfg.NoThink = *flags.NoThink
 		cfg.NoThinkExplicit = true
 	}
+	if flags.Images != nil {
+		cfg.Images = flags.Images
+	}
+	if flags.ViewImage != nil {
+		cfg.ViewImage = *flags.ViewImage
+	}
+	if flags.TextOnly != nil {
+		cfg.TextOnly = *flags.TextOnly
+	}
 	// Scope flags are CLI-only (never from the profile); the manifest overlay happens
 	// in ResolveScope (needs the workspace dir). nil ⇒ unset (leave manifest key).
 	if flags.ScopeAllow != nil {
@@ -1170,7 +1208,29 @@ func Resolve(flags Flags, getenv func(string) string, profilePath string) (Confi
 		cfg.MaxTokensComputed = cfg.MaxTokens > 0
 	}
 
+	if err := checkVision(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// ErrTextOnlyModel is returned when images are requested for a model marked
+// text-only. Refusing here is the cheap, honest failure: sending the images
+// anyway would either be rejected by the endpoint or, on a lenient one, silently
+// ignored — and a model answering about a picture it never saw is the worst case.
+var ErrTextOnlyModel = errors.New("config: model is marked text-only")
+
+func checkVision(cfg Config) error {
+	if !cfg.TextOnly {
+		return nil
+	}
+	switch {
+	case len(cfg.Images) > 0:
+		return fmt.Errorf("%w: --image needs a vision model, but %q has \"textOnly\": true (profile or --text-only)", ErrTextOnlyModel, cfg.Model)
+	case cfg.ViewImage:
+		return fmt.Errorf("%w: view_image (--view-image / KLOO_VIEW_IMAGE / \"viewImage\") needs a vision model, but %q has \"textOnly\": true", ErrTextOnlyModel, cfg.Model)
+	}
+	return nil
 }
 
 func loadMemoryConfig(profilePath string) (*MemoryConfig, error) {
