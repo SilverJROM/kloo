@@ -162,6 +162,8 @@ type workingMemory struct {
 	// so the summary is byte-stable and the boundary moves rarely.
 	folded        int
 	foldedEntries []string
+	// imagesFolded counts images that left the prompt with their folded messages.
+	imagesFolded int
 }
 
 // lowWaterFrac is the hysteresis. When the fold boundary has to advance, it
@@ -203,14 +205,17 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// the task message, which is never dropped. If the window cannot hold even
 	// that, there is no honest way to honor the hard ceiling — surface a config
 	// error rather than emit an over-ceiling prompt or drop the goal (§2.4).
-	floor := in.SystemTokens + in.estimate(in.Task)
+	// Task images are part of the floor: they are pinned with the task, so a window
+	// that cannot hold them cannot honestly run this task at all.
+	taskTokens := in.estimate(in.Task) + llm.ImageTokens(in.TaskImages)
+	floor := in.SystemTokens + taskTokens
 	if window > 0 && floor > window {
-		w.stats = MemoryStats{WindowTokens: window, Compactions: w.compactions, MapBudget: in.MapBudget, HotBudget: hotBudgetTokens(window)}
+		w.stats = MemoryStats{WindowTokens: window, Compactions: w.compactions, MapBudget: in.MapBudget, HotBudget: hotBudgetTokens(window), ImagesFolded: w.imagesFolded}
 		return nil, ErrWindowTooSmall
 	}
 
 	hotBudget := hotBudgetTokens(window)
-	task := llm.Message{Role: llm.RoleUser, Content: in.Task}
+	task := llm.Message{Role: llm.RoleUser, Content: in.Task, Images: in.TaskImages}
 	// #4: flag a verify failure identical to the previous turn's (opt-in).
 	repeatedVerify := false
 	if !in.LastVerify.Passed {
@@ -246,7 +251,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// No-compaction fast path: if the whole transcript projects under the soft
 	// trigger (or the window is unbounded), keep everything verbatim — the
 	// manager steps aside (overview §1: don't get in the way when there's room).
-	projectedFull := in.SystemTokens + in.estimate(in.Task) + pinTokens + tokensOfWith(allTail, in.estimate)
+	projectedFull := in.SystemTokens + taskTokens + pinTokens + tokensOfWith(allTail, in.estimate)
 	if window <= 0 || projectedFull <= triggerTokens(window) {
 		out := assemble(task, nil, pinMsgs, allTail)
 		w.stats = MemoryStats{
@@ -256,6 +261,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 			MapBudget:      in.MapBudget,
 			HotBudget:      hotBudget,
 			PinnedMessages: len(pinMsgs),
+			ImagesFolded:   w.imagesFolded,
 		}
 		return out, nil
 	}
@@ -278,6 +284,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 		}
 		w.foldedEntries = append(w.foldedEntries,
 			summarizeCold(allTail[w.folded:needFold], maxKeepItemTokens)...)
+		w.imagesFolded += llm.CountImages(allTail[w.folded:needFold])
 		w.folded = needFold
 		w.compactions++
 	}
@@ -307,7 +314,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 	// fixedTokens is everything that is NOT the named component, so a component's
 	// available budget is window − everything-else.
 	fixedExcept := func(skipSummary, skipFile, skipVerify bool) int {
-		t := in.SystemTokens + in.estimate(in.Task) + tokensOfWith(tail, in.estimate)
+		t := in.SystemTokens + taskTokens + tokensOfWith(tail, in.estimate)
 		if !skipSummary {
 			t += summaryTokens(entries, in.estimate)
 		}
@@ -370,6 +377,7 @@ func (w *workingMemory) Assemble(in MemoryInput) ([]llm.Message, error) {
 		TrimmedTail:    tailTrimmed,
 		MapBudget:      in.MapBudget,
 		HotBudget:      hotBudget,
+		ImagesFolded:   w.imagesFolded,
 	}
 	return out, nil
 }
@@ -420,11 +428,13 @@ func (in MemoryInput) estimate(s string) int {
 	return repomap.ApproxTokens(s)
 }
 
-// tokensOfWith sizes a message slice with the given estimator.
+// tokensOfWith sizes a message slice with the given estimator. Images count:
+// one screenshot costs more than most file reads, and a budget blind to it is a
+// budget that overflows the real window.
 func tokensOfWith(msgs []llm.Message, est func(string) int) int {
 	n := 0
 	for _, m := range msgs {
-		n += est(m.Content)
+		n += est(m.Content) + llm.ImageTokens(m.Images)
 	}
 	return n
 }
@@ -594,7 +604,7 @@ func keepTailWithin(tail []llm.Message, budget int) ([]llm.Message, bool) {
 	}
 	used, start := 0, len(tail)
 	for i := len(tail) - 1; i >= 0; i-- {
-		t := repomap.ApproxTokens(tail[i].Content)
+		t := repomap.ApproxTokens(tail[i].Content) + llm.ImageTokens(tail[i].Images)
 		if used+t > budget {
 			break
 		}
@@ -631,7 +641,12 @@ func summarizeCold(cold []llm.Message, perItemCap int) []string {
 			}
 			continue
 		}
-		// User observation.
+		// User observation. An image leaves the prompt with its message, and says
+		// so: the stub names the file and how to get it back, so the model never
+		// reasons about a picture it can no longer see as though it still could.
+		for _, img := range m.Images {
+			entries = append(entries, imageStub(img))
+		}
 		if isReadDump(m.Content) {
 			// Raw file-read dump → one-line stub; the file is re-read from disk on
 			// demand, never stored as truth (overview §3/§8).
@@ -646,6 +661,12 @@ func summarizeCold(cold []llm.Message, perItemCap int) []string {
 		}
 	}
 	return entries
+}
+
+// imageStub is the summary entry left where a compacted image was.
+func imageStub(img llm.ImagePart) string {
+	return fmt.Sprintf("[image %s removed from context by compaction — call %s on it again if you need to see it]",
+		img.Source, tools.NameViewImage)
 }
 
 // editSigFromArgs renders an applied edit's signature from a tool call's JSON

@@ -287,6 +287,12 @@ type ToolCounters struct {
 	// that hit a read-only file specifically (A2).
 	OffScopeEdits int
 	ReadOnlyEdits int
+	// ImagesViewed counts images view_image put into the conversation, and
+	// ImagesFolded how many of those compaction later replaced with a text stub —
+	// so a run that never looked is distinguishable from one whose images were
+	// shed, and neither is silent.
+	ImagesViewed int
+	ImagesFolded int
 }
 
 // Verifier runs the configured verify command and returns the real result.
@@ -403,17 +409,18 @@ var ErrWindowTooSmall = errors.New("agent: maxContextTokens below the irreducibl
 // MemoryInput is everything WorkingMemory.Assemble needs for one turn. The loop
 // fills it from its live state; the assembler is pure given these inputs.
 type MemoryInput struct {
-	Task         string        // convo[0], the goal — always pinned, never dropped
-	Convo        []llm.Message // full running transcript (Convo[0] is the task)
-	History      []llm.Message // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
-	LastVerify   VerifyResult  // pinned: the last real verify signal
-	EditPath     string        // file currently under edit ("" if none)
-	FreshFile    string        // EditPath re-read from disk this turn (bounded)
-	EditAnchor   string        // text from the most recent edit, used to locate the region worth pinning (KLOO_PIN_WINDOW)
-	Exercises    []string      // source files the verify command's tests import, named when a repeated failure means the fix is in another file
-	WindowTokens int           // = cfg.MaxContextTokens (the hard ceiling)
-	SystemTokens int           // ApproxTokens(system prompt incl. repo map) already spent
-	MapBudget    int           // the repo-map token budget the loop used this turn (for Stats/observability)
+	Task         string          // convo[0], the goal — always pinned, never dropped
+	TaskImages   []llm.ImagePart // images attached to the task (--image); pinned with it, never dropped
+	Convo        []llm.Message   // full running transcript (Convo[0] is the task)
+	History      []llm.Message   // prior-session turns (older than this run); seeded as the oldest tail so follow-ups have context. nil ⇒ standalone run.
+	LastVerify   VerifyResult    // pinned: the last real verify signal
+	EditPath     string          // file currently under edit ("" if none)
+	FreshFile    string          // EditPath re-read from disk this turn (bounded)
+	EditAnchor   string          // text from the most recent edit, used to locate the region worth pinning (KLOO_PIN_WINDOW)
+	Exercises    []string        // source files the verify command's tests import, named when a repeated failure means the fix is in another file
+	WindowTokens int             // = cfg.MaxContextTokens (the hard ceiling)
+	SystemTokens int             // ApproxTokens(system prompt incl. repo map) already spent
+	MapBudget    int             // the repo-map token budget the loop used this turn (for Stats/observability)
 	// Estimate sizes a string in tokens. The loop passes its calibrated estimator
 	// (learned from reported usage) so the assembler and the loop agree on the
 	// scale — mixing a calibrated system-prompt count with an uncalibrated history
@@ -436,6 +443,9 @@ type MemoryStats struct {
 	// per-turn pins. Everything above them is the stable prefix, which is what the
 	// prompt-cache breakpoint is placed at the end of.
 	PinnedMessages int
+	// ImagesFolded is how many images the compactor has replaced with a stub so
+	// far this run (cumulative, like Compactions).
+	ImagesFolded int
 }
 
 // Snapshot identifies a checkpointed working-tree state.

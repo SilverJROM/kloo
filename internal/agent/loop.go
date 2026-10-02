@@ -307,6 +307,16 @@ type Loop struct {
 	// toolCharsCache memoises the marshalled size of the tool schemas, which do
 	// not change within a run.
 	toolCharsCache int
+	// lastPromptImageTokens is the estimated image cost of the request act() just
+	// built. Images have no characters, so a turn that carried any is kept out of
+	// calibration: crediting their tokens to the text would teach the estimator
+	// that text is denser than it is, and every later budget would shrink.
+	lastPromptImageTokens int
+
+	// TaskImages are attached to the task message (convo[0]) — `--image`. The
+	// task is pinned and never compacted, so neither are these: they are the
+	// reference the whole run is judged against.
+	TaskImages []llm.ImagePart
 }
 
 func (l *Loop) onState(s State) {
@@ -463,7 +473,7 @@ func mutated(readOnlyTurn, timedOut bool, derr error) bool {
 func isReadOnlyTool(name string) bool {
 	return name == tools.NameReadFile || name == tools.NameListDir ||
 		name == tools.NameReadDir || name == tools.NameSearch ||
-		name == tools.NameCommandOutput
+		name == tools.NameCommandOutput || name == tools.NameViewImage
 }
 
 // stallLimit is the effective stall backstop threshold.
@@ -631,7 +641,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 	// and churn streak (which made a second "hello" churn at step 1).
 	l.Budget.Reset()
 	l.Churn.Reset()
-	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars = 0, 0, 0
+	l.promptTokens, l.cachedPromptTokens, l.lastPromptChars, l.lastPromptImageTokens = 0, 0, 0, 0
 	l.lastPromptMsgs, l.rePrefill = nil, RePrefillStats{}
 	l.toolCharsCache = 0
 
@@ -647,7 +657,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		l.Registry.Register(taskTool{parent: l, depth: l.subagentDepth, spawns: l.subagentSpawns})
 	}
 
-	convo := []llm.Message{{Role: llm.RoleUser, Content: task}}
+	convo := []llm.Message{{Role: llm.RoleUser, Content: task, Images: l.TaskImages}}
 	// One-time, at step 0: show the test this run is graded against. See
 	// failingTestSource — the brief names the test but never shows it, which is
 	// circular when the required behaviour IS the bug.
@@ -819,6 +829,7 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 		compactions := 0
 		if l.Memory != nil {
 			compactions = l.Memory.Stats().Compactions
+			counters.ImagesFolded = l.Memory.Stats().ImagesFolded
 		}
 		rep := &Report{
 			Reason:             reason,
@@ -1269,6 +1280,9 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			}
 		}
 		obs := observation(call, result, derr)
+		if derr == nil {
+			counters.ImagesViewed += len(result.Images)
+		}
 		correctableEdit := false // #2: this turn's edit failed a CORRECTABLE way (got a corrective within the repair budget)
 		if call.Name == tools.NameEditFile {
 			path := str(call.Args["path"])
@@ -1983,6 +1997,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 			FreshFile:    l.reread(curEditPath),
 			EditAnchor:   l.curEditAnchor,
 			Exercises:    l.verifyTestImports(),
+			TaskImages:   l.TaskImages,
 			WindowTokens: win,
 			SystemTokens: nonHistoryTokens,
 			MapBudget:    mapBudget,
@@ -2036,6 +2051,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// measured ratio collapse to the clamp floor on short conversations, where the
 	// schemas dominate the prompt.
 	l.lastPromptChars = messageChars(msgs) + l.toolSchemaChars(req.Tools)
+	l.lastPromptImageTokens = messageImageTokens(msgs)
 	// Measure what this turn re-sends. Here, because req.Messages is the final
 	// prompt — after assembly, pins, the map and any adapter rewriting — which is
 	// what the provider's cache actually sees.
@@ -2044,7 +2060,7 @@ func (l *Loop) act(ctx context.Context, task string, convo []llm.Message, lastVe
 	// measured. Set here rather than in BuildRequest because this is the only
 	// place that knows the final prompt size, schemas included — and the cap is a
 	// function of that size, not of the window alone (outputcap.go).
-	req.MaxTokens = l.outputCap(l.estimatedPromptTokens(l.lastPromptChars))
+	req.MaxTokens = l.outputCap(l.estimatedPromptTokens(l.lastPromptChars) + l.lastPromptImageTokens)
 
 	resp, err := l.complete(ctx, req)
 	if err != nil {
@@ -2129,7 +2145,7 @@ func estimateUsage(u llm.Usage, msgs []llm.Message, msg llm.Message) llm.Usage {
 	if u.TotalTokens != 0 {
 		return u
 	}
-	prompt := 0
+	prompt := messageImageTokens(msgs)
 	for _, m := range msgs {
 		prompt += repomap.ApproxTokens(m.Content)
 	}
@@ -2396,6 +2412,9 @@ func observation(call tools.Call, res tools.Result, err error) llm.Message {
 		if call.Name == tools.NameRunCommand {
 			b.WriteString(fmt.Sprintf("\n[exit %d]", res.ExitCode))
 		}
+		// view_image: the picture rides on the observation, a user turn, because
+		// most OpenAI-compatible servers only accept image parts from the user.
+		return llm.Message{Role: llm.RoleUser, Content: b.String(), Images: res.Images}
 	}
 	return llm.Message{Role: llm.RoleUser, Content: b.String()}
 }
@@ -3583,6 +3602,12 @@ func retryableLLMError(err error, retryCodes []int) bool {
 	if err == nil {
 		return false
 	}
+	// A text-only endpoint refusing image parts will refuse them every time, and
+	// llama.cpp reports it as a 500 — which the status ladder below would retry
+	// until the budget was gone, hiding the cause behind backoff lines.
+	if errors.Is(err, llm.ErrImageRejected) {
+		return false
+	}
 	// The classic local-endpoint hiccups: no token in time (cold load / slow
 	// prefill) and a stream that ended before [DONE] (dropped connection).
 	if errors.Is(err, llm.ErrStreamIdle) || errors.Is(err, llm.ErrStreamIncomplete) ||
@@ -3721,10 +3746,10 @@ func (l *Loop) observeUsage(u llm.Usage) {
 	l.cachedPromptTokens += u.CachedPromptTokens()
 	// Ground truth for the estimator: this many characters cost exactly this many
 	// tokens. Cleared either way, so one turn's chars can never be credited twice.
-	if l.Tokens != nil {
+	if l.Tokens != nil && l.lastPromptImageTokens == 0 {
 		l.Tokens.Observe(l.lastPromptChars, u.PromptTokens)
 	}
-	l.lastPromptChars = 0
+	l.lastPromptChars, l.lastPromptImageTokens = 0, 0
 }
 
 // tokenRatio is the run's measured chars-per-token, or 0 when nothing was
@@ -3751,6 +3776,15 @@ func (l *Loop) toolSchemaChars(tls []llm.Tool) int {
 	}
 	l.toolCharsCache = len([]rune(string(b)))
 	return l.toolCharsCache
+}
+
+// messageImageTokens is the estimated prompt cost of every image in msgs.
+func messageImageTokens(msgs []llm.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += llm.ImageTokens(m.Images)
+	}
+	return n
 }
 
 // messageChars counts the characters kloo actually sent as the prompt.
