@@ -96,6 +96,11 @@ type Message struct {
 	// cache_control. nil ⇒ the message serializes exactly as it always has, which
 	// is what keeps every endpoint that has never heard of this field unaffected.
 	CacheControl *CacheControl `json:"-"`
+	// Images are image parts sent alongside Content (vision input). Like
+	// CacheControl it never serializes as a key: a message with images is
+	// rewritten by MarshalJSON into the content-parts form, text part first. Only
+	// user messages carry them. A message without images is unaffected.
+	Images []ImagePart `json:"-"`
 }
 
 // CacheControl is the prompt-cache breakpoint marker. "ephemeral" is the only
@@ -108,23 +113,35 @@ type CacheControl struct {
 func CacheControlEphemeral() *CacheControl { return &CacheControl{Type: "ephemeral"} }
 
 // contentPart is one element of the content-parts array form. Only a marked
-// message is ever serialized this way.
+// message, or one carrying images, is ever serialized this way.
 type contentPart struct {
 	Type         string        `json:"type"`
 	Text         string        `json:"text"`
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
+// imageContentPart is the OpenAI-compatible image part. Declared separately from
+// contentPart so adding it cannot change a text part's bytes.
+type imageContentPart struct {
+	Type         string        `json:"type"` // always "image_url"
+	ImageURL     imageURL      `json:"image_url"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"`
+}
+
 // markedMessage mirrors Message's serializable fields in the SAME key order, with
 // content as a parts array. Declared separately rather than reusing Message so the
 // unmarked path stays byte-for-byte what it was.
 type markedMessage struct {
-	Role             string        `json:"role"`
-	Content          []contentPart `json:"content"`
-	ReasoningContent string        `json:"reasoning_content,omitempty"`
-	Name             string        `json:"name,omitempty"`
-	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          []any      `json:"content"` // contentPart / imageContentPart
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 // MarshalJSON emits the plain OpenAI message shape unless this message carries a
@@ -136,17 +153,41 @@ type markedMessage struct {
 func (m Message) MarshalJSON() ([]byte, error) {
 	// plain has no methods, so marshalling it cannot recurse back into this one.
 	type plain Message
-	if m.CacheControl == nil {
+	if m.CacheControl == nil && len(m.Images) == 0 {
 		return json.Marshal(plain(m))
 	}
 	return json.Marshal(markedMessage{
 		Role:             m.Role,
-		Content:          []contentPart{{Type: "text", Text: m.Content, CacheControl: m.CacheControl}},
+		Content:          m.contentParts(),
 		ReasoningContent: m.ReasoningContent,
 		Name:             m.Name,
 		ToolCalls:        m.ToolCalls,
 		ToolCallID:       m.ToolCallID,
 	})
+}
+
+// contentParts builds the parts array: the text first (the task reads before the
+// pictures it refers to), then one image_url part per image. A breakpoint marks
+// the LAST part, since cache_control means "cache through here" and the images
+// are part of the message being cached. A marked message without images yields
+// exactly the single text part it always did.
+func (m Message) contentParts() []any {
+	parts := make([]any, 0, 1+len(m.Images))
+	if m.Content != "" || len(m.Images) == 0 {
+		parts = append(parts, contentPart{Type: "text", Text: m.Content})
+	}
+	for _, img := range m.Images {
+		parts = append(parts, imageContentPart{Type: "image_url", ImageURL: imageURL{URL: img.DataURL()}})
+	}
+	switch last := parts[len(parts)-1].(type) {
+	case contentPart:
+		last.CacheControl = m.CacheControl
+		parts[len(parts)-1] = last
+	case imageContentPart:
+		last.CacheControl = m.CacheControl
+		parts[len(parts)-1] = last
+	}
+	return parts
 }
 
 // FinalizeReasoning applies the reasoning_content fallback: when Content is blank but

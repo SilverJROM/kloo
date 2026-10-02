@@ -91,11 +91,11 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, onDelta func(Delta
 
 	// A non-2xx arrives before the event stream — read the body as an APIError.
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return ChatResponse{}, &APIError{
+		return ChatResponse{}, c.classifyAPIError(req, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Status:     httpResp.Status,
 			Body:       readAPIErrorBody(httpResp.Body, c.apiKey),
-		}
+		})
 	}
 
 	resp, err := parseSSE(streamCtx, httpResp.Body, onDelta)

@@ -133,11 +133,11 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (ChatResponse, e
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return ChatResponse{}, &APIError{
+		return ChatResponse{}, c.classifyAPIError(req, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Status:     httpResp.Status,
 			Body:       readAPIErrorBody(httpResp.Body, c.apiKey),
-		}
+		})
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
@@ -311,6 +311,12 @@ func normalizeMessages(in []Message) []Message {
 				prev.Content = strings.TrimRight(prev.Content, "\n") + "\n" + m.Content
 			}
 			prev.ToolCalls = append(prev.ToolCalls, m.ToolCalls...)
+			// Images ride with the merged text; dropping them here would be exactly
+			// the silent loss the vision path promises never to commit. Copied, not
+			// appended in place, because prev.Images aliases the caller's slice.
+			if len(m.Images) > 0 {
+				prev.Images = append(append([]ImagePart{}, prev.Images...), m.Images...)
+			}
 			// Carry the INCOMING breakpoint onto the merged message. The guard above
 			// only protects prev's marker, so without this an incoming marker was
 			// copied nowhere and silently vanished — the request went out with no
