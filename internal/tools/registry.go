@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/lokalhub/kloo/internal/llm"
 )
 
 // Tool-vocabulary sentinel errors. Adapters and the loop match these with
@@ -88,6 +90,9 @@ type Result struct {
 	ExitCode  int
 	TimedOut  bool
 	Truncated bool
+	// Images are attached to the observation message the loop builds from this
+	// result (view_image). nil for every other tool.
+	Images []llm.ImagePart
 }
 
 // Tool is one entry in the agent's vocabulary. The interface is named by
