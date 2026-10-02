@@ -142,6 +142,7 @@ different profile with `/profile <path>`.
 | `kloo tokens [--json] "<task>"` | Estimate whether a task prompt fits the resolved context window. Reads the task from the argument or `--file`; starts nothing. |
 | `kloo "<task>"` | Run the autonomous loop non-interactively, streaming progress to stdout. |
 | `kloo --benchmark "<task>"` | Automation preset: task loop + JSON summary + stable exit codes. |
+| `kloo --image ref.png "<task>"` | Attach image(s) to the task for a vision model; `--view-image` lets the model open workspace images mid-run. See [vision input](docs/configuration.md#vision-input---image----view-image). |
 
 ### Common flags
 

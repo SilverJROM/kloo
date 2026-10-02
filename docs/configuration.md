@@ -248,6 +248,9 @@ churn detection as the primary guard).
 | `--llm-cold-load-timeout` | `2m` | Non-streaming model-call timeout. |
 | `--llm-stream-idle-timeout` | `5m` | Streaming no-token idle timeout. |
 | `--no-think` | `false` | Ask compatible OpenAI-style backends to disable thinking/reasoning by sending `reasoning_effort: "none"` on chat requests. |
+| `--image` | _(unset)_ | Attach an image (png/jpeg/gif/webp, ≤5 MiB) to the task message (repeatable). Needs a task argument and a vision model. See [vision input](#vision-input---image----view-image). |
+| `--view-image` | `false` | Offer the `view_image` tool so the model can look at a workspace image mid-run. Also `KLOO_VIEW_IMAGE=1` or profile `viewImage`. |
+| `--text-only` | `false` | Mark the model text-only for this run: `--image`/`--view-image` are refused up front. Per model: profile `textOnly`. |
 | `--no-mcp` | `false` | Disable all [MCP servers](mcp.md) for this run (overrides `KLOO_MCP` and the profile's `mcpServers`). |
 | `--allowed-dirs` | _(unset)_ | Directories **outside** the workspace that an `AGENTS.md` [`@import`](#project-instructions-agentsmd) may read from. Repeatable or comma-separated. Read-only and load-time only — it never widens the model's file tools. |
 | `--allow-env` | _(unset)_ | Env var **names** to forward from kloo's own environment into `run_command` (repeatable/comma-separated). By default executed commands get a least-privilege env (`PATH/HOME/LANG/…`) so a model-proposed command can't exfiltrate secrets; this is the deliberate, user-granted passthrough for a **trusted deploy/CI step** that needs a specific secret (e.g. `--allow-env CLOUDFLARE_API_TOKEN,ADMIN_PASSWORD`). The value is read from kloo's env at run time — it never appears in the model's prompt or transcript. |
@@ -517,6 +520,7 @@ via `--file`, not both. The command always exits 0; scripts read `fits`.
 | `KLOO_CONTEXT_TOKENS` | Per-step context window (same as `--ctx`). |
 | `KLOO_EFFORT` | Effort tier (same as `--effort`). |
 | `KLOO_LLM_MAX_RETRIES` | Extra model-call retry attempts after the first. |
+| `KLOO_VIEW_IMAGE` | `1`/`true` offers the `view_image` tool (same as `--view-image`). |
 | `KLOO_LLM_RETRY_CODES` | Comma-separated retryable HTTP status codes. |
 | `KLOO_LLM_RETRY_BASE_DELAY` | First retry backoff (`500ms`, `2s`, or plain seconds). |
 | `KLOO_LLM_RETRY_MAX_DELAY` | Maximum retry backoff. |
@@ -1044,6 +1048,45 @@ larger output budget instead of silently spinning.
 
 `--no-think` has CLI precedence and is preserved across runtime `/model` switches
 in the TUI (a raw model switch never changes the thinking setting).
+
+## Vision input (`--image` / `--view-image`)
+
+For a model behind an OpenAI-compatible endpoint that accepts `image_url`
+content parts (Qwen-VL, Gemma 3, llama.cpp with an `--mmproj`, …):
+
+```sh
+kloo --image ref.png --image current.png "make the header match ref.png"
+kloo --view-image "run the screenshot script, then check shots/page.png against the spec"
+```
+
+- **`--image <path>`** (repeatable) attaches the image to the **task message**,
+  after the task text, as a base64 data-URL `image_url` part. Task images are
+  pinned with the task: they are never compacted, and they count towards the
+  irreducible prompt floor (a window that cannot hold them is a config error).
+  Paths are read relative to the current directory; each is capped at 5 MiB and
+  type-checked from its bytes. `--json` records them under `images`
+  (path, mime, bytes, width, height, estimated_tokens).
+- **`view_image`** (opt-in: `--view-image`, `KLOO_VIEW_IMAGE=1`, profile
+  `viewImage`) lets the model load a workspace image mid-run — e.g. a screenshot
+  its own check produced. It reads through the workspace jail like `read_file`,
+  under the same 5 MiB cap, and is read-only for the rails. The image rides on
+  the observation (user) turn. When compaction folds that turn, the image goes
+  with it and the running summary records
+  `[image <path> removed from context by compaction — call view_image on it again …]`;
+  `tool_counters.images_viewed` / `images_folded` count both.
+- **Token accounting.** Each image is estimated at one token per 28×28 patch,
+  clamped to 64–1280 (+8 framing), or 1288 when the size is unknown. Turns that
+  carry images are excluded from chars-per-token calibration.
+- **Text-only models.** Mark one with profile `"textOnly": true` (or
+  `--text-only`) and kloo refuses `--image`/`view_image` before any model call
+  (`config: model is marked text-only`). If an unmarked endpoint rejects image
+  parts, the run fails with `failure_code: image_rejected` naming the model and
+  the remedy; the rejection is never retried, even when the server reports it as
+  a 500 (llama.cpp without `--mmproj`).
+
+```json
+{ "my-vl-model": { "viewImage": true }, "coder-7b": { "textOnly": true } }
+```
 
 ## Task Loop And Benchmark Output
 
