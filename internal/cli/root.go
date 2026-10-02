@@ -156,6 +156,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 		flagJSONOnly         bool
 		flagStatusFile       string
 		flagNoThink          bool
+		flagImages           []string
+		flagViewImage        bool
+		flagTextOnly         bool
 		flagAllow            []string
 		flagDeny             []string
 		flagReadOnly         []string
@@ -289,6 +292,15 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			if fs.Changed("no-think") {
 				flags.NoThink = &flagNoThink
 			}
+			if fs.Changed("image") {
+				flags.Images = flagImages
+			}
+			if fs.Changed("view-image") {
+				flags.ViewImage = &flagViewImage
+			}
+			if fs.Changed("text-only") {
+				flags.TextOnly = &flagTextOnly
+			}
 			if fs.Changed("allow") {
 				flags.ScopeAllow = flagAllow
 			}
@@ -346,6 +358,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 			lopts := lintOptsFrom(fs.Changed("lint"), fs.Changed("no-lint"), flagLint, flagNoLint, deps.Getenv)
 
 			if len(args) == 0 {
+				if len(cfg.Images) > 0 {
+					return fmt.Errorf("--image attaches images to a task; pass the task as an argument")
+				}
 				if cfg.BenchmarkMode {
 					return exitError{code: benchmarkExitConfigError, err: fmt.Errorf("--benchmark requires a task argument")}
 				}
@@ -398,6 +413,9 @@ func NewRootCmd(deps Deps) *cobra.Command {
 	f.BoolVar(&flagJSONOnly, "json-only", false, "require the final assistant answer to be valid JSON only")
 	f.StringVar(&flagStatusFile, "status-file", "", "write the run summary JSON to this path after a visible TUI run completes")
 	f.BoolVar(&flagNoThink, "no-think", false, "ask compatible OpenAI-style backends to disable thinking/reasoning for chat requests")
+	f.StringArrayVar(&flagImages, "image", nil, "attach an image (png/jpeg/gif/webp, ≤5 MiB) to the task message as an image_url part (repeatable; needs a vision model)")
+	f.BoolVar(&flagViewImage, "view-image", false, "offer the view_image tool so the model can look at workspace images mid-run (also KLOO_VIEW_IMAGE=1 or profile \"viewImage\")")
+	f.BoolVar(&flagTextOnly, "text-only", false, "mark the model text-only: refuse --image/--view-image up front (profile: \"textOnly\": true)")
 	f.StringSliceVar(&flagAllow, "allow", nil, "glob(s) the model MAY edit (repeatable/comma-separated); empty ⇒ all in-jail files unless narrowed. Any scope flag disables model-facing run_command")
 	f.StringSliceVar(&flagDeny, "deny", nil, "glob(s) the model may NOT edit (repeatable/comma-separated); deny wins over --allow")
 	f.StringSliceVar(&flagReadOnly, "read-only", nil, "glob(s) the model may READ but not edit (repeatable/comma-separated); wins over --allow")

@@ -38,7 +38,7 @@ func benchmarkExitCode(summary runSummary) int {
 	switch summary.FailureCode {
 	case "verify_failed", "unverified":
 		return benchmarkExitVerify
-	case "model_error":
+	case "model_error", "image_rejected":
 		return benchmarkExitModel
 	case "tool_call_invalid", "tool_error":
 		return benchmarkExitTool

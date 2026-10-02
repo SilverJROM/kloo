@@ -62,6 +62,12 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	if err != nil {
 		return maybeBenchmarkSetupError(cfg, err)
 	}
+	// Task images are read (and validated) before any model call, so a typo'd path
+	// or an oversized screenshot fails the run in milliseconds, not after a load.
+	taskImages, err := loadTaskImages(cfg.Images)
+	if err != nil {
+		return maybeBenchmarkSetupError(cfg, err)
+	}
 
 	// MCP: connect configured servers (non-fatal) + register their tools alongside
 	// the builtins; the startup/trust lines go to out. Closed on return.
@@ -77,6 +83,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	}
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(out))
 	defer closeMCP()
+	registerVisionTools(cfg, reg, ws)
 	recall := memoryRecall(ctx, cfg, mcpMgr, cwd, task, writerLogf(out))
 	systemPrompt := SystemPrompt() + scopeSystemPromptSuffix(ws) + agentsInstructions(cwd, cfg.AllowedImportDirs, cfg.MaxContextTokens, writerLogf(out))
 	systemPrompt += memoryRecallSystemSection(recall)
@@ -145,6 +152,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		RetryBaseDelay:       cfg.LLMRetryBaseDelay,
 		RetryMaxDelay:        cfg.LLMRetryMaxDelay,
 		RetryableStatusCodes: cfg.LLMRetryableStatusCodes,
+		TaskImages:           taskImages,
 	}
 
 	// Stream progress/tools to out. Deltas are buffered and flushed on the next
@@ -176,7 +184,14 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 
 	fmt.Fprintf(out, "kloo task run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
 		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)
-	fmt.Fprintf(out, "task: %s\n\n", task)
+	fmt.Fprintf(out, "task: %s\n", task)
+	for _, img := range taskImages {
+		fmt.Fprintf(out, "image: %s\n", describeImage(img))
+	}
+	if cfg.ViewImage {
+		fmt.Fprintln(out, "view_image: on")
+	}
+	fmt.Fprintln(out)
 
 	start := time.Now()
 	// CAP THE FIRST ATTEMPT when a restart is armed (KLOO_RESTART_FIRST_S).
@@ -244,6 +259,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	fmt.Fprintln(out)
 	printHeadlessReport(out, rep, elapsed)
 	summary := buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr)
+	summary.Images = imageSummaries(taskImages)
 	memoryStore(ctx, cfg, mcpMgr, cwd, task, summary, rep, writerLogf(out))
 	if cfg.JSONSummary || cfg.BenchmarkMode {
 		withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the JSON
@@ -265,6 +281,49 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		return fmt.Errorf("task run did not reach success (reason: %s)", reportReason(rep))
 	}
 	return nil
+}
+
+// loadTaskImages reads the --image files. They are the user's own arguments, so
+// they are not jailed to the workspace the way view_image is — but they are
+// size-capped and type-checked like every other read.
+func loadTaskImages(paths []string) ([]llm.ImagePart, error) {
+	out := make([]llm.ImagePart, 0, len(paths))
+	for _, p := range paths {
+		img, err := llm.ReadImageFile(p, p)
+		if err != nil {
+			return nil, fmt.Errorf("--image: %w", err)
+		}
+		out = append(out, img)
+	}
+	return out, nil
+}
+
+// registerVisionTools offers view_image when it was opted into. config.Resolve
+// has already refused the combination with a text-only model.
+func registerVisionTools(cfg config.Config, reg *tools.Registry, ws tools.Workspace) {
+	if cfg.ViewImage && !cfg.TextOnly {
+		reg.Register(tools.NewViewImageTool(ws))
+	}
+}
+
+func describeImage(img llm.ImagePart) string {
+	size := ""
+	if img.Width > 0 {
+		size = fmt.Sprintf(" %dx%d", img.Width, img.Height)
+	}
+	return fmt.Sprintf("%s (%s%s, %d bytes, ~%d tokens)", img.Source, img.MIME, size, len(img.Data), img.EstimateTokens())
+}
+
+func imageSummaries(imgs []llm.ImagePart) []imageSummary {
+	if len(imgs) == 0 {
+		return nil
+	}
+	out := make([]imageSummary, 0, len(imgs))
+	for _, img := range imgs {
+		out = append(out, imageSummary{Path: img.Source, MIME: img.MIME, Bytes: len(img.Data),
+			Width: img.Width, Height: img.Height, EstimatedTokens: img.EstimateTokens()})
+	}
+	return out
 }
 
 func maybeBenchmarkSetupError(cfg config.Config, err error) error {
@@ -426,6 +485,19 @@ type toolCountersSummary struct {
 	ToolErrors     int `json:"tool_errors"`
 	OffScopeEdits  int `json:"off_scope_edits"`
 	ReadOnlyEdits  int `json:"read_only_edits"`
+	// Vision counters, omitted when zero so a text run's JSON is unchanged.
+	ImagesViewed int `json:"images_viewed,omitempty"`
+	ImagesFolded int `json:"images_folded,omitempty"`
+}
+
+// imageSummary records one --image the task was sent with.
+type imageSummary struct {
+	Path            string `json:"path"`
+	MIME            string `json:"mime"`
+	Bytes           int    `json:"bytes"`
+	Width           int    `json:"width,omitempty"`
+	Height          int    `json:"height,omitempty"`
+	EstimatedTokens int    `json:"estimated_tokens"`
 }
 
 type runSummary struct {
@@ -440,6 +512,8 @@ type runSummary struct {
 	ElapsedSeconds float64 `json:"elapsed_seconds"`
 	TokensPerSec   float64 `json:"tokens_per_sec"`
 	Compactions    int     `json:"compactions"`
+	// Images are the --image files sent on the task message. Omitted when none.
+	Images []imageSummary `json:"images,omitempty"`
 	// Prompt-cache accounting. Omitted entirely when the provider reports none
 	// (most local servers), so a local run's JSON is byte-identical to before.
 	PromptTokens       int `json:"prompt_tokens,omitempty"`
@@ -559,6 +633,8 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				ToolErrors:        tc.ToolErrors,
 				OffScopeEdits:     tc.OffScopeEdits,
 				ReadOnlyEdits:     tc.ReadOnlyEdits,
+				ImagesViewed:      tc.ImagesViewed,
+				ImagesFolded:      tc.ImagesFolded,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
@@ -840,6 +916,16 @@ func patchOnlyRejectFailure(rep *agent.Report, detail *failureDetail) (string, *
 func classifyErrorFailure(rep *agent.Report, err error, detail *failureDetail) (string, *failureDetail) {
 	detail.Message = boundedMessage(err)
 	switch {
+	case errors.Is(err, llm.ErrImageRejected):
+		// Before the generic api_error arm: the remedy (a vision model, or
+		// "textOnly") is specific, and a bare model_error would hide it.
+		detail.Source = "llm"
+		detail.Class = "image_rejected"
+		var apiErr *llm.APIError
+		if errors.As(err, &apiErr) {
+			detail.HTTPStatus = apiErr.StatusCode
+		}
+		return "image_rejected", detail
 	case errors.Is(err, agent.ErrWindowTooSmall) || strings.Contains(strings.ToLower(detail.Message), "context") && strings.Contains(strings.ToLower(detail.Message), "too small"):
 		detail.Source = "config"
 		detail.Class = "window_too_small"
@@ -918,6 +1004,8 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("tool_errors", c.ToolErrors)
 	add("off_scope_edits", c.OffScopeEdits)
 	add("read_only_edits", c.ReadOnlyEdits)
+	add("images_viewed", c.ImagesViewed)
+	add("images_folded", c.ImagesFolded)
 	return strings.Join(parts, " ")
 }
 

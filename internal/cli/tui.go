@@ -65,6 +65,7 @@ func defaultLaunchTUI(cfg config.Config, baseFlags config.Flags, verifyCmd strin
 	defer cancel()
 	reg, mcpMgr, closeMCP := wireMCP(ctx, cfg, ws, writerLogf(os.Stderr))
 	defer closeMCP()
+	registerVisionTools(cfg, reg, ws)
 
 	clientFactory := func(endpoint, model, apiKey string) llm.LLMClient {
 		return llm.New(endpoint, model, llm.WithAPIKey(apiKey), llm.WithTimeout(cfg.LLMColdLoadTimeout), llm.WithStreamIdleTimeout(cfg.LLMStreamIdleTimeout))
