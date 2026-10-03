@@ -182,8 +182,11 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 		fmt.Fprintf(out, "⟳ model call failed transiently — retrying %d/%d in %s\n", attempt, max, wait.Round(time.Second))
 	}
 
-	fmt.Fprintf(out, "kloo task run — effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
-		cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)
+	// The build is on the first line so a run log alone says which kloo produced
+	// it: a GLM failure was once chased against a fix the failing run may never
+	// have had, because nothing in the log named the binary.
+	fmt.Fprintf(out, "kloo task run — kloo %s (%s)  effort=%s  model=%s  steps=%d  churn=%d  verify=%q  lint=%q\n",
+		version, commit, cfg.Effort, cfg.Model, cfg.MaxSteps, cfg.ChurnRounds, verifyCmd, lintCmd)
 	fmt.Fprintf(out, "task: %s\n", task)
 	for _, img := range taskImages {
 		fmt.Fprintf(out, "image: %s\n", describeImage(img))
@@ -260,6 +263,7 @@ func defaultRunHeadless(cfg config.Config, task, verifyCmd string, lint lintOpts
 	printHeadlessReport(out, rep, elapsed)
 	summary := buildRunSummary(cfg, verifyCmd, rep, elapsed, runErr)
 	summary.Images = imageSummaries(taskImages)
+	summary.KlooVersion = version + " (" + commit + ")"
 	memoryStore(ctx, cfg, mcpMgr, cwd, task, summary, rep, writerLogf(out))
 	if cfg.JSONSummary || cfg.BenchmarkMode {
 		withFilesChanged(&summary, ws.Root()) // B3: changed-file accounting for the JSON
@@ -503,7 +507,9 @@ type imageSummary struct {
 }
 
 type runSummary struct {
-	BenchmarkMode  bool    `json:"benchmark_mode,omitempty"`
+	BenchmarkMode bool `json:"benchmark_mode,omitempty"`
+	// KlooVersion names the build that produced this result ("v0.25.5-dev (e5a75fb)").
+	KlooVersion    string  `json:"kloo_version,omitempty"`
 	Model          string  `json:"model"`
 	Endpoint       string  `json:"endpoint"`
 	Ctx            int     `json:"ctx"`
