@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
 )
@@ -53,20 +54,35 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 	// Only consult the text when no native tool_calls were present, so well-behaved
 	// models are unaffected; try JSON first, then the function dialect.
 	if len(calls) == 0 && msg.Content != "" {
-		calls = append(calls, extractJSONToolCalls(msg.Content)...)
-		if len(calls) == 0 {
+		// GLM's dialect is EXCLUSIVE when its unique <arg_key> marker is present: a
+		// write_file of package.json carries a JSON object with a "name" key as its
+		// value, which the JSON extractor below would otherwise claim as a call to
+		// a tool named after the package — and a malformed GLM call must reach the
+		// loud error below, not be half-recovered by some other dialect.
+		glm := strings.Contains(msg.Content, glmKeyOpen)
+		if glm {
+			calls = append(calls, extractGLMToolCalls(msg.Content)...)
+		} else {
+			calls = append(calls, extractJSONToolCalls(msg.Content)...)
+		}
+		if len(calls) == 0 && !glm {
 			calls = append(calls, extractFunctionCalls(msg.Content)...)
 		}
 		// Also the Claude-style invoke/parameter dialect some DeepSeek models emit
 		// wrapped in <｜DSML｜…｜> tokens (deepseek-v4-*): the provider leaves it in
 		// text instead of native tool_calls, so recover it here too.
-		if len(calls) == 0 {
+		if len(calls) == 0 && !glm {
 			calls = append(calls, extractInvokeToolCalls(msg.Content)...)
 		}
 		// And the <invoke_name>/<parameters> dialect (deepseek-v4-flash via
 		// OpenRouter), which the three above all miss.
-		if len(calls) == 0 {
+		if len(calls) == 0 && !glm {
 			calls = append(calls, extractInvokeNameToolCalls(msg.Content)...)
+		}
+		// And GLM's own template dialect (glm-5.3-flash) without arguments:
+		// <tool_call>finish</tool_call> has no <arg_key>, so it lands here, last.
+		if len(calls) == 0 && !glm {
+			calls = append(calls, extractGLMToolCalls(msg.Content)...)
 		}
 		// Nothing parsed, but the reply is clearly ATTEMPTING a call: fail loudly
 		// so the loop's corrective re-prompt fires. Falling through here returned
