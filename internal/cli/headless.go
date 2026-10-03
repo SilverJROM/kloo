@@ -488,6 +488,8 @@ type toolCountersSummary struct {
 	// Vision counters, omitted when zero so a text run's JSON is unchanged.
 	ImagesViewed int `json:"images_viewed,omitempty"`
 	ImagesFolded int `json:"images_folded,omitempty"`
+	// TextToolCalls: turns whose call was recovered from a text dialect.
+	TextToolCalls int `json:"text_tool_calls,omitempty"`
 }
 
 // imageSummary records one --image the task was sent with.
@@ -635,6 +637,7 @@ func buildRunSummary(cfg config.Config, verifyCmd string, rep *agent.Report, ela
 				ReadOnlyEdits:     tc.ReadOnlyEdits,
 				ImagesViewed:      tc.ImagesViewed,
 				ImagesFolded:      tc.ImagesFolded,
+				TextToolCalls:     tc.TextToolCalls,
 			}
 		}
 		// B5: surface the precheck/postcheck gates attempted for the final verify.
@@ -1006,6 +1009,7 @@ func formatToolCounters(c agent.ToolCounters) string {
 	add("read_only_edits", c.ReadOnlyEdits)
 	add("images_viewed", c.ImagesViewed)
 	add("images_folded", c.ImagesFolded)
+	add("text_tool_calls", c.TextToolCalls)
 	return strings.Join(parts, " ")
 }
 

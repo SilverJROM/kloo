@@ -1006,6 +1006,13 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			return finish(ReasonError, err, nil, nil)
 		}
 		l.observeUsage(usage)
+		// The call arrived as TEXT in content rather than as structured tool_calls
+		// and was recovered by one of the adapter's dialect extractors. Counted so a
+		// model that leans on a text dialect is visible, and so a new extractor can
+		// be shown to fire rather than assumed to.
+		if len(msg.ToolCalls) == 0 {
+			counters.TextToolCalls++
+		}
 		convo = append(convo, msg)
 		for _, ig := range ignored {
 			ignoredAll = append(ignoredAll, ig.Name)

@@ -293,6 +293,9 @@ type ToolCounters struct {
 	// shed, and neither is silent.
 	ImagesViewed int
 	ImagesFolded int
+	// TextToolCalls counts turns whose tool call was recovered from text content
+	// (a dialect extractor) rather than read from structured tool_calls.
+	TextToolCalls int
 }
 
 // Verifier runs the configured verify command and returns the real result.
