@@ -101,7 +101,7 @@ func (XMLAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		}
 		i = openTagEnd + relClose + len("</tool>")
 	}
-	return calls, nil
+	return normalizeTextCalls(calls), nil
 }
 
 // Parse extracts exactly one <tool> block (the one-tool-per-turn rail). Zero/many

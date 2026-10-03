@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/lokalhub/kloo/internal/llm"
 )
@@ -210,7 +211,10 @@ func (r *Registry) EditOnlyView(allowFinish bool) *Registry {
 func (r *Registry) Dispatch(ctx context.Context, c Call) (Result, error) {
 	t, ok := r.tools[c.Name]
 	if !ok {
-		return Result{}, fmt.Errorf("tools: %q: %w", c.Name, ErrUnknownTool)
+		// Name the vocabulary: "unknown tool" alone leaves a small model guessing
+		// at the next name, and a wrong guess costs another turn.
+		return Result{}, fmt.Errorf("tools: %q is not an available tool (available: %s): %w",
+			c.Name, strings.Join(r.order, ", "), ErrUnknownTool)
 	}
 	if err := t.Schema().Validate(c.Args); err != nil {
 		return Result{}, err

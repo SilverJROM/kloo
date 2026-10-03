@@ -91,6 +91,10 @@ func (NativeFCAdapter) ParseAll(msg llm.Message) ([]Call, error) {
 		if len(calls) == 0 && looksLikeToolCall(msg.Content) {
 			return nil, fmt.Errorf("native: reply contains an unparseable tool call: %w", ErrMalformedToolCall)
 		}
+		// Text calls are written from the model's training, not the schema: map
+		// the tool and argument names it was trained on (ls, cat, file_path) to
+		// kloo's. Structured tool_calls above are left exactly as sent.
+		calls = normalizeTextCalls(calls)
 	}
 	// Strip any leaked tool-call markup from string args. The <function=…> dialect
 	// frequently batches calls or forgets to close a <parameter=…>, so the server's
