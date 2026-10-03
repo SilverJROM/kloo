@@ -1413,6 +1413,16 @@ func (l *Loop) Run(ctx context.Context, task string) (*Report, error) {
 			obs = buildClobberCorrection(l.Root, str(call.Args["path"]))
 		}
 		convo = append(convo, obs)
+		// SEVERAL CALLS IN ONE TURN. Only the first runs (one tool per turn is the
+		// loop's contract), and the rest used to be dropped without a word — so a
+		// model that batched read_file + list_dir + search believed it had three
+		// results and reasoned from two it never got. Say so, by name, right after
+		// the result of the one that ran. It never fails the run: batching is a
+		// habit of text-dialect models (GLM's template emits it), not an error.
+		if len(ignored) > 0 {
+			recordRail(RailExtraCalls)
+			convo = append(convo, extraCallsNote(call, ignored))
+		}
 
 		// ── LINT (advisory) ─────────────────────────────────────────────────
 		// After a SUCCESSFUL edit, run the fast lint on the edited file and feed its
@@ -3783,6 +3793,18 @@ func (l *Loop) toolSchemaChars(tls []llm.Tool) int {
 	}
 	l.toolCharsCache = len([]rune(string(b)))
 	return l.toolCharsCache
+}
+
+// extraCallsNote tells the model which of its batched calls did not run.
+func extraCallsNote(ran tools.Call, ignored []tools.Call) llm.Message {
+	names := make([]string, 0, len(ignored))
+	for _, c := range ignored {
+		names = append(names, c.Name)
+	}
+	return llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(
+		"Only ONE tool call runs per turn. I ran the first one (%s) — its result is above. "+
+			"These were NOT run and have no results: %s. If you still need them, call them one at a time, "+
+			"starting with your next turn.", ran.Name, strings.Join(names, ", "))}
 }
 
 // messageImageTokens is the estimated prompt cost of every image in msgs.

@@ -169,6 +169,9 @@ const (
 	// prose turn instead of calling finish (the premature `answered` stop on a
 	// multi-step ops task). Nudged once to finish-or-continue. See loop.go.
 	RailConfirmFinish Rail = "confirm-finish"
+	// RailExtraCalls: one turn carried several tool calls. The first ran; the model
+	// was told the rest did NOT, by name. Never a stop — see extraCallsNote.
+	RailExtraCalls Rail = "extra-calls"
 	// RailPromiseToAct: the model narrated a next action ("let me run X") or gave up
 	// after a failing command, with no tool call. Nudged to actually emit the call.
 	RailPromiseToAct Rail = "promise-to-act"
